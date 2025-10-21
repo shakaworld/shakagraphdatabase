@@ -2,15 +2,18 @@ use chrono::{DateTime, Utc, Duration};
 use nalgebra::Vector3;
 use serde::{Serialize, Deserialize};
 use crate::octree::Octree3D;
+use parking_lot::{RwLock, Mutex};
+use std::sync::Arc;
 
 /// A single temporal slice within the tesseract.
 /// Each slice represents a time period and contains an octree.
+/// Uses parking_lot for high-performance concurrent access.
 #[derive(Debug)]
 pub struct TemporalSlice {
     pub start_date: DateTime<Utc>,
     pub end_date: DateTime<Utc>,
-    pub octree: Octree3D,
-    pub case_count: usize,
+    octree: RwLock<Octree3D>,
+    case_count: Mutex<usize>,
 }
 
 impl TemporalSlice {
@@ -18,8 +21,8 @@ impl TemporalSlice {
         Self {
             start_date,
             end_date,
-            octree: Octree3D::new(Vector3::zeros(), 1.0, 10),
-            case_count: 0,
+            octree: RwLock::new(Octree3D::new(Vector3::zeros(), 1.0, 10)),
+            case_count: Mutex::new(0),
         }
     }
 
@@ -29,19 +32,28 @@ impl TemporalSlice {
     }
 
     /// Insert a case into this slice's octree
-    pub fn insert_case(&mut self, position: Vector3<f32>, case_id: String, case_date: DateTime<Utc>) -> bool {
+    /// Thread-safe with write lock
+    pub fn insert_case(&self, position: Vector3<f32>, case_id: String, case_date: DateTime<Utc>) -> bool {
         if !self.contains_date(&case_date) {
             return false;
         }
 
-        self.octree.insert(position, case_id);
-        self.case_count += 1;
+        // Get write lock on octree
+        let mut octree = self.octree.write();
+        octree.insert(position, case_id);
+
+        // Update count atomically
+        let mut count = self.case_count.lock();
+        *count += 1;
+
         true
     }
 
     /// Query cases within spatial radius in this time slice
+    /// Thread-safe with read lock
     pub fn query_spatial(&self, query_vector: Vector3<f32>, radius: f32) -> Vec<String> {
-        self.octree.query_radius(query_vector, radius)
+        let octree = self.octree.read();
+        octree.query_radius(query_vector, radius)
     }
 
     /// Get statistics about this temporal slice
@@ -49,8 +61,13 @@ impl TemporalSlice {
         SliceStats {
             start_date: self.start_date,
             end_date: self.end_date,
-            case_count: self.case_count,
+            case_count: *self.case_count.lock(),
         }
+    }
+
+    /// Get current case count
+    pub fn case_count(&self) -> usize {
+        *self.case_count.lock()
     }
 }
 
@@ -66,6 +83,9 @@ pub struct SliceStats {
 /// The tesseract divides time into 8 slices, each containing a 3D octree
 /// for spatial partitioning. This enables efficient temporal range queries
 /// combined with spatial constraints.
+///
+/// Thread-safe: All operations use parking_lot locks for high-performance
+/// concurrent access.
 ///
 /// # Temporal Structure
 /// - 8 time slices evenly distributed across date range
@@ -87,8 +107,8 @@ pub struct Tesseract {
     pub min_date: DateTime<Utc>,
     pub max_date: DateTime<Utc>,
     pub num_slices: usize,
-    slices: Vec<TemporalSlice>,
-    total_cases: usize,
+    slices: Vec<Arc<TemporalSlice>>,
+    total_cases: Mutex<usize>,
 }
 
 impl Tesseract {
@@ -106,7 +126,7 @@ impl Tesseract {
             max_date,
             num_slices,
             slices,
-            total_cases: 0,
+            total_cases: Mutex::new(0),
         }
     }
 
@@ -114,7 +134,7 @@ impl Tesseract {
         min_date: DateTime<Utc>,
         max_date: DateTime<Utc>,
         num_slices: usize,
-    ) -> Vec<TemporalSlice> {
+    ) -> Vec<Arc<TemporalSlice>> {
         let total_duration = max_date - min_date;
         let slice_duration = total_duration / num_slices as i32;
 
@@ -129,7 +149,7 @@ impl Tesseract {
                 current_date + slice_duration
             };
 
-            slices.push(TemporalSlice::new(start_date, end_date));
+            slices.push(Arc::new(TemporalSlice::new(start_date, end_date)));
             current_date = end_date;
         }
 
@@ -137,6 +157,7 @@ impl Tesseract {
     }
 
     /// Find which temporal slice contains a given date
+    /// Uses binary search for O(log n) time complexity
     fn find_slice_index(&self, date: &DateTime<Utc>) -> Option<usize> {
         if *date < self.min_date || *date >= self.max_date {
             return None;
@@ -166,6 +187,7 @@ impl Tesseract {
     }
 
     /// Insert a case into the appropriate temporal slice
+    /// Thread-safe: Can be called concurrently from multiple threads
     ///
     /// # Arguments
     /// * `position` - Spatial position in vector space
@@ -175,7 +197,7 @@ impl Tesseract {
     /// # Returns
     /// `true` if inserted successfully, `false` if date out of range
     pub fn insert_case(
-        &mut self,
+        &self,
         position: Vector3<f32>,
         case_id: String,
         case_date: DateTime<Utc>,
@@ -188,13 +210,15 @@ impl Tesseract {
         let success = self.slices[slice_idx].insert_case(position, case_id, case_date);
 
         if success {
-            self.total_cases += 1;
+            let mut total = self.total_cases.lock();
+            *total += 1;
         }
 
         success
     }
 
     /// Query cases within temporal range and spatial radius
+    /// Thread-safe: Can be called concurrently with inserts
     ///
     /// # Arguments
     /// * `query_vector` - Query vector for spatial similarity
@@ -226,6 +250,8 @@ impl Tesseract {
 
         let mut results = Vec::new();
 
+        // Query each slice in the temporal range
+        // Slices can be queried concurrently
         for i in start_idx..=end_idx {
             let slice_results = self.slices[i].query_spatial(query_vector, radius);
             results.extend(slice_results);
@@ -254,7 +280,7 @@ impl Tesseract {
 
         for i in start_idx..=end_idx {
             // Get all cases from this slice
-            let slice_results = self.slices[i].octree.query_radius(Vector3::zeros(), f32::MAX);
+            let slice_results = self.slices[i].query_spatial(Vector3::zeros(), f32::MAX);
             results.extend(slice_results);
         }
 
@@ -267,9 +293,9 @@ impl Tesseract {
     }
 
     /// Rebalance octrees in slices that are too deep or unbalanced
-    pub fn rebalance(&mut self) {
-        for slice in &mut self.slices {
-            if slice.case_count > 1000 {
+    pub fn rebalance(&self) {
+        for slice in &self.slices {
+            if slice.case_count() > 1000 {
                 // Threshold for rebalancing
                 // TODO: Implement octree rebalancing
             }
@@ -279,14 +305,28 @@ impl Tesseract {
     /// Get comprehensive statistics about the tesseract
     pub fn get_stats(&self) -> TesseractStats {
         TesseractStats {
-            total_cases: self.total_cases,
+            total_cases: *self.total_cases.lock(),
             num_slices: self.num_slices,
             min_date: self.min_date,
             max_date: self.max_date,
             slice_distribution: self.get_slice_distribution(),
         }
     }
+
+    /// Get total number of cases
+    pub fn total_cases(&self) -> usize {
+        *self.total_cases.lock()
+    }
+
+    /// Get reference to a specific temporal slice
+    pub fn get_slice(&self, index: usize) -> Option<Arc<TemporalSlice>> {
+        self.slices.get(index).cloned()
+    }
 }
+
+// Implement Send and Sync for thread safety
+unsafe impl Send for Tesseract {}
+unsafe impl Sync for Tesseract {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TesseractStats {
@@ -298,18 +338,26 @@ pub struct TesseractStats {
 }
 
 /// Lightweight link from Icosahedron face to Tesseract
+/// Uses Arc for zero-cost sharing
 pub struct TesseractLink {
-    pub tesseract: Tesseract,
+    pub tesseract: Arc<Tesseract>,
 }
 
 impl TesseractLink {
-    pub fn new(tesseract: Tesseract) -> Self {
+    pub fn new(tesseract: Arc<Tesseract>) -> Self {
         Self { tesseract }
+    }
+
+    /// Create from owned tesseract
+    pub fn from_owned(tesseract: Tesseract) -> Self {
+        Self {
+            tesseract: Arc::new(tesseract),
+        }
     }
 
     /// Insert case through the link
     pub fn insert_case(
-        &mut self,
+        &self,
         position: Vector3<f32>,
         case_id: String,
         case_date: DateTime<Utc>,
@@ -331,5 +379,18 @@ impl TesseractLink {
     /// Get statistics through the link
     pub fn get_stats(&self) -> TesseractStats {
         self.tesseract.get_stats()
+    }
+
+    /// Clone the Arc reference (cheap)
+    pub fn clone_ref(&self) -> Arc<Tesseract> {
+        Arc::clone(&self.tesseract)
+    }
+}
+
+impl Clone for TesseractLink {
+    fn clone(&self) -> Self {
+        Self {
+            tesseract: Arc::clone(&self.tesseract),
+        }
     }
 }

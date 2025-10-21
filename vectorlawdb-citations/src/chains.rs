@@ -306,6 +306,11 @@ impl JurisCitationChains {
             },
         }
     }
+
+    /// Get total number of chains across all types
+    pub fn total_chains(&self) -> usize {
+        self.chains.values().map(|chains| chains.len()).sum()
+    }
 }
 
 impl Default for JurisCitationChains {
