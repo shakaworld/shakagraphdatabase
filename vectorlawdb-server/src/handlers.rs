@@ -14,6 +14,9 @@ use crate::models::*;
 // Import citation types
 use vectorlawdb_citations::{Citation, CitationType};
 
+// Import VQL components
+use vectorlawdb_query::vql::{VQLParser, QueryOptimizer};
+
 //=============================================================================
 // Health & Root Endpoints
 //=============================================================================
@@ -206,21 +209,124 @@ pub async fn execute_query(
 ) -> Json<QueryResponse> {
     let start_time = Instant::now();
 
-    // TODO: Implement VQL parser
-    // For now, return empty results
-    tracing::warn!("VQL query not implemented yet: {}", req.query);
+    // Parse VQL query
+    let parsed_query = match VQLParser::parse(&req.query) {
+        Ok(query) => query,
+        Err(e) => {
+            tracing::error!("VQL parse error: {}", e);
+            return Json(QueryResponse {
+                results: vec![],
+                execution_time_ms: start_time.elapsed().as_secs_f64() * 1000.0,
+                rows_returned: 0,
+                rows_scanned: 0,
+                explanation: Some(format!("Parse error: {}", e)),
+            });
+        }
+    };
+
+    // Optimize query
+    let query_plan = QueryOptimizer::optimize(parsed_query.clone());
+
+    // Generate explanation if requested
+    let explanation = if req.explain {
+        let plan_steps: Vec<String> = query_plan.steps.iter()
+            .map(|step| format!("{:?} (cost: {:.2})", step.step_type, step.cost))
+            .collect();
+        Some(format!(
+            "Query Type: {:?}\nExecution Plan:\n{}\nEstimated Cost: {:.2}\nEstimated Rows: {}",
+            parsed_query.query_type,
+            plan_steps.join("\n"),
+            query_plan.estimated_cost,
+            query_plan.estimated_rows
+        ))
+    } else {
+        None
+    };
+
+    // Execute query based on type
+    let (results, rows_scanned) = execute_vql_query(&state, &parsed_query);
 
     Json(QueryResponse {
-        results: vec![],
+        results: results.clone(),
         execution_time_ms: start_time.elapsed().as_secs_f64() * 1000.0,
-        rows_returned: 0,
-        rows_scanned: 0,
-        explanation: if req.explain {
-            Some("VQL parser not yet implemented".to_string())
-        } else {
-            None
-        },
+        rows_returned: results.len(),
+        rows_scanned,
+        explanation,
     })
+}
+
+/// Execute VQL query and return results
+fn execute_vql_query(
+    state: &AppState,
+    query: &vectorlawdb_query::vql::VQLQuery,
+) -> (Vec<serde_json::Value>, usize) {
+    let storage = state.storage.read();
+    let mut results = Vec::new();
+    let mut rows_scanned = 0;
+
+    // Simple execution based on query filters
+    // In production, this would use the full QueryExecutor
+    for (case_id, case) in storage.iter() {
+        rows_scanned += 1;
+
+        // Apply filters
+        let mut matches = true;
+
+        for filter in &query.filters {
+            use vectorlawdb_query::vql::Predicate;
+
+            match filter {
+                Predicate::Equals { field, value } => {
+                    if field == "jurisdiction" {
+                        if case.jurisdiction.as_ref() != Some(value) {
+                            matches = false;
+                            break;
+                        }
+                    } else if field == "court" {
+                        if case.court.as_ref() != Some(value) {
+                            matches = false;
+                            break;
+                        }
+                    }
+                }
+                Predicate::After { date } => {
+                    if &case.date < date {
+                        matches = false;
+                        break;
+                    }
+                }
+                Predicate::Before { date } => {
+                    if &case.date > date {
+                        matches = false;
+                        break;
+                    }
+                }
+                _ => {
+                    // Other predicates not yet implemented
+                    tracing::warn!("Predicate not yet implemented: {:?}", filter);
+                }
+            }
+        }
+
+        if matches {
+            results.push(serde_json::json!({
+                "case_id": case.case_id,
+                "name": case.name,
+                "date": case.date,
+                "jurisdiction": case.jurisdiction,
+                "court": case.court,
+            }));
+
+            // Apply limit
+            if let Some(limit) = query.limit {
+                if results.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+
+    (results, rows_scanned)
 }
 
 //=============================================================================

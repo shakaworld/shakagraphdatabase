@@ -11,6 +11,7 @@ path = "src/main.rs"
 # Workspace crates
 vectorlawdb-spatial = { path = "../vectorlawdb-spatial" }
 vectorlawdb-citations = { path = "../vectorlawdb-citations" }
+vectorlawdb-query = { path = "../vectorlawdb-query" }
 
 # External dependencies
 tokio = { workspace = true }
