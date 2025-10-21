@@ -8,3 +8,4 @@ pub use icosahedron::Icosahedron;
 pub use octree::Octree3D;
 pub use tesseract::{Tesseract, TesseractLink, TemporalSlice};
 pub use hierarchical::{HierarchicalSpatialIndex, IndexConfig, HierarchicalIndexStats};
+pub use offset_contact::{OffsetGeometricContact, Contact, ContactType, InfluenceZone, ContactStatistics};

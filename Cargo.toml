@@ -38,6 +38,7 @@ zstd = "0.13"
 nalgebra = "0.32"          # Linear algebra
 geo = "0.27"               # Geometric algorithms
 rstar = "0.11"             # R-tree spatial index
+petgraph = "0.6"           # Graph data structures and algorithms
 
 # Hashing
 ahash = "0.8"              # Fast hashing

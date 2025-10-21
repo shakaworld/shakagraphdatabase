@@ -6,3 +6,4 @@ edition.workspace = true
 [dependencies]
 serde = { workspace = true }
 nom = "7.1"  # Parser combinator library
+num_cpus = "1.16"  # For parallel execution
