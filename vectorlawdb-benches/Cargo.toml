@@ -1,0 +1,13 @@
+[package]
+name = "vectorlawdb-benches"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vectorlawdb-core = { path = "../vectorlawdb-core" }
+criterion = "0.5"
+tempfile = "3.8"
+
+[[bench]]
+name = "lsm_bench"
+harness = false

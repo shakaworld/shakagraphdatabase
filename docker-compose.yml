@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  vectorlawdb:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      - RUST_LOG=info
+      - DATA_DIR=/data
+    restart: unless-stopped

@@ -1,0 +1,8 @@
+[package]
+name = "vectorlawdb-query"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+nom = "7.1"  # Parser combinator library
