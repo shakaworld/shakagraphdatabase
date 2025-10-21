@@ -8,6 +8,18 @@ name = "vldb"
 path = "src/main.rs"
 
 [dependencies]
+# Workspace crates
+vectorlawdb-core = { path = "../vectorlawdb-core" }
+vectorlawdb-spatial = { path = "../vectorlawdb-spatial" }
+vectorlawdb-citations = { path = "../vectorlawdb-citations" }
+vectorlawdb-query = { path = "../vectorlawdb-query" }
+
+# External dependencies
 clap = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = "1.0"
+chrono = { workspace = true }
+colored = "2.1"
+parking_lot = { workspace = true }
