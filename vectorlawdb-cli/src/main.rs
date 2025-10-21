@@ -8,11 +8,53 @@ use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::net::SocketAddr;
+use std::collections::HashMap;
+use parking_lot::RwLock;
+use chrono::{DateTime, Utc};
+use serde::{Serialize, Deserialize};
 
 // Import VectorLawDB components
 use vectorlawdb_spatial::{HierarchicalSpatialIndex, IndexConfig};
-use vectorlawdb_citations::CitationGraph;
+use vectorlawdb_citations::{CitationGraph, Citation, CitationType};
 use vectorlawdb_query::vql::{VQLParser, QueryOptimizer, QueryExecutor};
+
+/// In-memory case storage
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseData {
+    pub case_id: String,
+    pub name: String,
+    pub text: String,
+    pub date: String,
+    pub jurisdiction: Option<String>,
+    pub court: Option<String>,
+    pub citations: Vec<String>,
+    pub embedding: Vec<f32>,
+    pub metadata: HashMap<String, serde_json::Value>,
+}
+
+/// Database state
+pub struct DatabaseState {
+    pub storage: Arc<RwLock<HashMap<String, CaseData>>>,
+    pub spatial_index: Arc<HierarchicalSpatialIndex>,
+    pub citation_graph: Arc<RwLock<CitationGraph>>,
+}
+
+impl DatabaseState {
+    /// Create a new database state
+    pub fn new(min_date: DateTime<Utc>, max_date: DateTime<Utc>) -> Self {
+        let config = IndexConfig {
+            min_date,
+            max_date,
+            max_cases_per_leaf: 100,
+        };
+
+        Self {
+            storage: Arc::new(RwLock::new(HashMap::new())),
+            spatial_index: Arc::new(HierarchicalSpatialIndex::new(config)),
+            citation_graph: Arc::new(RwLock::new(CitationGraph::new())),
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "vldb")]
@@ -390,13 +432,53 @@ fn handle_search(
     println!("  k: {}", num_results);
     println!("  radius: {}", radius);
 
-    // TODO: Implement actual search using spatial index
+    // Load or create database
+    let db = load_or_create_database(data_dir)?;
 
-    println!("\n{}", format!("Found {} similar cases:", num_results).green());
-    println!("  1. case_abc (similarity: 0.88, distance: 0.12)");
-    println!("  2. case_def (similarity: 0.85, distance: 0.15)");
-    println!("  3. case_ghi (similarity: 0.82, distance: 0.18)");
-    println!("  ...");
+    // Get the query case
+    let storage = db.storage.read();
+    let query_case = storage.get(&case_id)
+        .ok_or_else(|| anyhow::anyhow!("Case not found: {}", case_id))?;
+
+    let query_embedding = &query_case.embedding;
+    let query_position = embedding_to_vector3(query_embedding);
+
+    // Query spatial index
+    let candidate_ids = db.spatial_index.query(
+        query_position,
+        radius,
+        None,
+        None,
+    );
+
+    // Calculate similarities
+    let mut similar_cases: Vec<(String, f32, f32)> = candidate_ids
+        .iter()
+        .filter_map(|id| {
+            if id == &case_id {
+                return None; // Skip query case
+            }
+            let case = storage.get(id)?;
+            let similarity = cosine_similarity(query_embedding, &case.embedding);
+            let distance = euclidean_distance(query_embedding, &case.embedding);
+            Some((case.name.clone(), similarity, distance))
+        })
+        .collect();
+
+    // Sort by similarity descending
+    similar_cases.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    similar_cases.truncate(num_results);
+
+    if similar_cases.is_empty() {
+        println!("\n{}", "No similar cases found.".yellow());
+        return Ok(());
+    }
+
+    println!("\n{}", format!("Found {} similar cases:", similar_cases.len()).green());
+    for (i, (name, similarity, distance)) in similar_cases.iter().enumerate() {
+        println!("  {}. {} (similarity: {:.3}, distance: {:.3})",
+                 i + 1, name, similarity, distance);
+    }
 
     Ok(())
 }
@@ -410,16 +492,47 @@ fn handle_cite(data_dir: &PathBuf, case_id: String, depth: usize) -> Result<()> 
     );
     println!("  Max depth: {}", depth);
 
-    // TODO: Implement actual citation analysis
+    // Load or create database
+    let db = load_or_create_database(data_dir)?;
+    let graph = db.citation_graph.read();
+
+    // Get citation counts
+    let outgoing = graph.get_citations_from(&case_id);
+    let incoming = graph.get_citations_to(&case_id);
+    let transitive_closure = graph.get_transitive_closure(&case_id, depth);
 
     println!("\n{}", "Citation Network Analysis:".cyan().bold());
-    println!("  Direct citations (outgoing): 15");
-    println!("  Cited by (incoming): 23");
-    println!("  Transitive closure (depth {}): 156 cases", depth);
-    println!("\n{}", "Authority Metrics:".cyan());
-    println!("  PageRank score: 0.0042");
-    println!("  Citation rank: 23");
-    println!("  Hub score: 0.0031");
+    println!("  Direct citations (outgoing): {}", outgoing.len());
+    println!("  Cited by (incoming): {}", incoming.len());
+    println!("  Transitive closure (depth {}): {} cases", depth, transitive_closure.len());
+
+    // Calculate authority metrics
+    let citation_rank = graph.citation_rank(&case_id);
+    let pagerank_scores = graph.compute_pagerank(0.85, 50);
+    let pagerank = pagerank_scores.get(&case_id).unwrap_or(&0.0);
+
+    let hits_scores = graph.compute_hits(50);
+    let (hub_score, auth_score) = hits_scores.get(&case_id).unwrap_or(&(0.0, 0.0));
+
+    println!("\n{}", "Authority Metrics:".cyan().bold());
+    println!("  Citation rank: {}", citation_rank);
+    println!("  PageRank score: {:.6}", pagerank);
+    println!("  Hub score: {:.6}", hub_score);
+    println!("  Authority score: {:.6}", auth_score);
+
+    // Show top outgoing citations
+    if !outgoing.is_empty() {
+        println!("\n{}", "Top Outgoing Citations:".cyan());
+        let storage = db.storage.read();
+        for (i, citation) in outgoing.iter().take(5).enumerate() {
+            if let Some(case) = storage.get(&citation.to_case_id) {
+                println!("  {}. {} ({})", i + 1, case.name, case.case_id);
+            }
+        }
+        if outgoing.len() > 5 {
+            println!("  ... and {} more", outgoing.len() - 5);
+        }
+    }
 
     Ok(())
 }
@@ -598,4 +711,73 @@ fn handle_benchmark(
     println!("\n{}", "✓ Benchmarks complete".green());
 
     Ok(())
+}
+
+//=============================================================================
+// Helper Functions
+//=============================================================================
+
+/// Load database from data directory or create a new one
+fn load_or_create_database(data_dir: &PathBuf) -> Result<DatabaseState> {
+    let config_path = data_dir.join("config.json");
+
+    if !config_path.exists() {
+        // Create with default date range
+        let min_date = DateTime::parse_from_rfc3339("1900-01-01T00:00:00Z")?.with_timezone(&Utc);
+        let max_date = DateTime::parse_from_rfc3339("2099-12-31T23:59:59Z")?.with_timezone(&Utc);
+        return Ok(DatabaseState::new(min_date, max_date));
+    }
+
+    // Load config and create database
+    let config_data = std::fs::read_to_string(&config_path)?;
+    let config: serde_json::Value = serde_json::from_str(&config_data)?;
+
+    let min_date = DateTime::parse_from_rfc3339(
+        config["min_date"].as_str().unwrap_or("1900-01-01T00:00:00Z")
+    )?.with_timezone(&Utc);
+
+    let max_date = DateTime::parse_from_rfc3339(
+        config["max_date"].as_str().unwrap_or("2099-12-31T23:59:59Z")
+    )?.with_timezone(&Utc);
+
+    Ok(DatabaseState::new(min_date, max_date))
+}
+
+/// Convert embedding to 3D vector for spatial indexing
+fn embedding_to_vector3(embedding: &[f32]) -> nalgebra::Vector3<f32> {
+    if embedding.len() >= 3 {
+        nalgebra::Vector3::new(embedding[0], embedding[1], embedding[2])
+    } else {
+        nalgebra::Vector3::zeros()
+    }
+}
+
+/// Calculate cosine similarity between two embeddings
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+
+    dot / (norm_a * norm_b)
+}
+
+/// Calculate Euclidean distance between two embeddings
+fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return f32::MAX;
+    }
+
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).powi(2))
+        .sum::<f32>()
+        .sqrt()
 }

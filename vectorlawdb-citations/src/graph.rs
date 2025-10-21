@@ -290,6 +290,82 @@ impl CitationGraph {
         pagerank
     }
 
+    /// Compute HITS (Hubs and Authorities) scores
+    /// Returns a HashMap mapping case_id -> (hub_score, authority_score)
+    pub fn compute_hits(&self, max_iterations: usize) -> HashMap<String, (f64, f64)> {
+        let all_nodes = self.get_all_cases();
+        let n = all_nodes.len() as f64;
+
+        if n == 0.0 {
+            return HashMap::new();
+        }
+
+        // Initialize hub and authority scores to 1.0
+        let mut hub_scores: HashMap<String, f64> = all_nodes
+            .iter()
+            .map(|node| (node.clone(), 1.0))
+            .collect();
+        let mut auth_scores: HashMap<String, f64> = all_nodes
+            .iter()
+            .map(|node| (node.clone(), 1.0))
+            .collect();
+
+        // HITS algorithm iteration
+        for _ in 0..max_iterations {
+            let mut new_auth_scores = HashMap::new();
+            let mut new_hub_scores = HashMap::new();
+
+            // Update authority scores: sum of hub scores of incoming neighbors
+            for node in &all_nodes {
+                let incoming = self.get_incoming_neighbors(node);
+                let auth_score: f64 = incoming
+                    .iter()
+                    .map(|neighbor| hub_scores.get(neighbor).unwrap_or(&0.0))
+                    .sum();
+                new_auth_scores.insert(node.clone(), auth_score);
+            }
+
+            // Update hub scores: sum of authority scores of outgoing neighbors
+            for node in &all_nodes {
+                let outgoing = self.get_outgoing_neighbors(node);
+                let hub_score: f64 = outgoing
+                    .iter()
+                    .map(|neighbor| new_auth_scores.get(neighbor).unwrap_or(&0.0))
+                    .sum();
+                new_hub_scores.insert(node.clone(), hub_score);
+            }
+
+            // Normalize authority scores
+            let auth_norm: f64 = new_auth_scores.values().map(|x| x * x).sum::<f64>().sqrt();
+            if auth_norm > 0.0 {
+                for score in new_auth_scores.values_mut() {
+                    *score /= auth_norm;
+                }
+            }
+
+            // Normalize hub scores
+            let hub_norm: f64 = new_hub_scores.values().map(|x| x * x).sum::<f64>().sqrt();
+            if hub_norm > 0.0 {
+                for score in new_hub_scores.values_mut() {
+                    *score /= hub_norm;
+                }
+            }
+
+            auth_scores = new_auth_scores;
+            hub_scores = new_hub_scores;
+        }
+
+        // Combine into single HashMap
+        all_nodes
+            .iter()
+            .map(|node| {
+                let hub = *hub_scores.get(node).unwrap_or(&0.0);
+                let auth = *auth_scores.get(node).unwrap_or(&0.0);
+                (node.clone(), (hub, auth))
+            })
+            .collect()
+    }
+
     /// Get most cited cases (authorities)
     pub fn get_most_cited(&self, n: usize) -> Vec<(String, usize)> {
         let all_cases = self.get_all_cases();
@@ -439,5 +515,50 @@ mod tests {
         assert!(closure.contains("b"));
         assert!(closure.contains("c"));
         assert!(closure.contains("d"));
+    }
+
+    #[test]
+    fn test_hits_algorithm() {
+        let graph = CitationGraph::new();
+
+        // Create a hub-and-spoke pattern
+        // Central hub 'h' cites many authorities
+        // Authority 'a1' is cited by many hubs
+        graph.add_citation(Citation {
+            from_case_id: "h".to_string(),
+            to_case_id: "a1".to_string(),
+            citation_type: CitationType::Cites,
+            weight: 1.0,
+        });
+
+        graph.add_citation(Citation {
+            from_case_id: "h".to_string(),
+            to_case_id: "a2".to_string(),
+            citation_type: CitationType::Cites,
+            weight: 1.0,
+        });
+
+        graph.add_citation(Citation {
+            from_case_id: "h2".to_string(),
+            to_case_id: "a1".to_string(),
+            citation_type: CitationType::Cites,
+            weight: 1.0,
+        });
+
+        let hits_scores = graph.compute_hits(50);
+
+        // 'h' should have a high hub score (cites many)
+        let (hub_h, _) = hits_scores.get("h").unwrap();
+        assert!(*hub_h > 0.0);
+
+        // 'a1' should have a high authority score (cited by many)
+        let (_, auth_a1) = hits_scores.get("a1").unwrap();
+        assert!(*auth_a1 > 0.0);
+
+        // Verify scores are normalized (between 0 and 1)
+        for (_case, (hub, auth)) in hits_scores.iter() {
+            assert!(*hub >= 0.0 && *hub <= 1.0);
+            assert!(*auth >= 0.0 && *auth <= 1.0);
+        }
     }
 }

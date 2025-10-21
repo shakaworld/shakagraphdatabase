@@ -494,19 +494,31 @@ pub async fn get_citation_network(
         })
         .collect();
 
-    // Calculate citation rank (simple version)
+    // Calculate citation rank and metrics
     let pagerank_score = graph.citation_rank(&case_id) as f32;
+
+    // Calculate transitive closure (reachable cases within depth 10)
+    let transitive_closure = graph.get_transitive_closure(&case_id, 10);
+    let transitive_closure_size = transitive_closure.len();
+
+    // Calculate HITS scores
+    let hits_scores = graph.compute_hits(100);
+    let hub_score = hits_scores.get(&case_id).map(|(h, _)| *h as f32).unwrap_or(0.0);
+    let authority_score = hits_scores.get(&case_id).map(|(_, a)| *a as f32).unwrap_or(pagerank_score);
+
+    // Find co-cited cases (cases that cite same cases as this one)
+    let co_cited_cases = find_co_cited_cases(&graph, &storage, &case_id, 5);
 
     Ok(Json(CitationNetworkResponse {
         case_id: case_id.clone(),
         case_name: case.name.clone(),
         direct_citations,
         cited_by,
-        transitive_closure_size: 0, // TODO: Implement BFS for transitive closure
+        transitive_closure_size,
         pagerank_score,
-        hub_score: 0.0, // TODO: Implement HITS algorithm
-        authority_score: pagerank_score,
-        co_cited_cases: vec![], // TODO: Implement co-citation analysis
+        hub_score,
+        authority_score,
+        co_cited_cases,
     }))
 }
 
@@ -624,6 +636,53 @@ pub async fn clear_caches(
 //=============================================================================
 // Helper Functions
 //=============================================================================
+
+/// Find cases that are co-cited with the given case
+fn find_co_cited_cases(
+    graph: &parking_lot::RwLockReadGuard<vectorlawdb_citations::CitationGraph>,
+    storage: &parking_lot::RwLockReadGuard<std::collections::HashMap<String, CaseData>>,
+    case_id: &str,
+    limit: usize,
+) -> Vec<CitationInfo> {
+    use std::collections::HashMap;
+
+    // Get all cases that cite this case
+    let citing_cases: Vec<String> = graph.get_citations_to(case_id)
+        .iter()
+        .map(|c| c.from_case_id.clone())
+        .collect();
+
+    // Count how many citing cases each co-cited case has
+    let mut co_citation_counts: HashMap<String, usize> = HashMap::new();
+
+    for citing_case in &citing_cases {
+        // Get all cases that this citing case also cites
+        for citation in graph.get_citations_from(citing_case) {
+            let cited_case = &citation.to_case_id;
+            // Don't include the original case
+            if cited_case != case_id {
+                *co_citation_counts.entry(cited_case.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Sort by co-citation count and take top N
+    let mut co_cited: Vec<(String, usize)> = co_citation_counts.into_iter().collect();
+    co_cited.sort_by(|a, b| b.1.cmp(&a.1));
+    co_cited.truncate(limit);
+
+    // Convert to CitationInfo
+    co_cited
+        .iter()
+        .filter_map(|(id, _count)| {
+            let case = storage.get(id)?;
+            Some(CitationInfo {
+                case_id: case.case_id.clone(),
+                name: case.name.clone(),
+            })
+        })
+        .collect()
+}
 
 fn generate_embedding(text: &str) -> Vec<f32> {
     // Simple hash-based embedding for demonstration
