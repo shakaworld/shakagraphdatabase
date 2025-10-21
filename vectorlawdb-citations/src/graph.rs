@@ -92,6 +92,20 @@ impl CitationGraph {
 
         None
     }
+
+    pub fn get_all_cases(&self) -> Vec<String> {
+        let mut cases = HashSet::new();
+
+        for case_id in self.outgoing.keys() {
+            cases.insert(case_id.clone());
+        }
+
+        for case_id in self.incoming.keys() {
+            cases.insert(case_id.clone());
+        }
+
+        cases.into_iter().collect()
+    }
 }
 
 impl Default for CitationGraph {

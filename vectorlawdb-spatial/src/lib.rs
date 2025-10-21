@@ -6,3 +6,4 @@ pub mod offset_contact;
 
 pub use icosahedron::Icosahedron;
 pub use octree::Octree3D;
+pub use tesseract::{Tesseract, TesseractLink, TemporalSlice};
